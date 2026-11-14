@@ -25,8 +25,9 @@ import net.neoforged.neoforge.fluids.capability.IFluidHandler;
 
 /**
  * Аддон для Compact Steam Engine:
- *  1) приём лавы через трубы/помпы Create;
- *  2) автоматический режим нагрузки (см. mixin/EngineAutoLoadMixin).
+ *  1) приём лавы через трубы Create;
+ *  2) забор лавы напрямую из соседних баков;
+ *  3) автоматический режим нагрузки.
  */
 @Mod("csfluid")
 public class CsFluid {
@@ -40,8 +41,15 @@ public class CsFluid {
     /** максимум "запаса" лавы внутри двигателя, в мБ */
     static final int CAPACITY_MB = 4000;
 
+    public enum DrainMode {
+        SEQUENTIAL, // опустошать один за другим
+        EVEN        // делить поровну между всеми
+    }
+
     // ---------------- конфиг (config/csfluid-common.toml) ----------------
     public static final ModConfigSpec SPEC;
+
+    // Авто-нагрузка
     public static final ModConfigSpec.BooleanValue AUTO_ENABLED;
     public static final ModConfigSpec.IntValue CHECK_INTERVAL;
     public static final ModConfigSpec.IntValue LOWER_DELAY;
@@ -49,8 +57,15 @@ public class CsFluid {
     public static final ModConfigSpec.DoubleValue MARGIN;
     public static final ModConfigSpec.BooleanValue WRENCH_TOGGLE;
 
+    // Забор из баков
+    public static final ModConfigSpec.BooleanValue PULL_TANKS_ENABLED;
+    public static final ModConfigSpec.EnumValue<DrainMode> PULL_DRAIN_MODE;
+    public static final ModConfigSpec.IntValue PULL_INTERVAL;
+    public static final ModConfigSpec.IntValue PULL_MAX_RATE;
+
     static {
         ModConfigSpec.Builder b = new ModConfigSpec.Builder();
+
         b.push("autoLoad");
         AUTO_ENABLED = b.comment("Автоматический режим нагрузки. Слайдер мощности двигателя становится ЛИМИТОМ.",
                 "false = двигатель работает как обычно (фиксированная ступень).")
@@ -63,11 +78,26 @@ public class CsFluid {
                 .defineInRange("safetyMargin", 0.05, 0.0, 1.0);
         MIN_STEP = b.comment("Минимальная ступень мощности на холостом ходу.")
                 .defineInRange("minStep", 1, 1, 100);
-        WRENCH_TOGGLE = b.comment("ПКМ гаечным ключом Create (в основной руке, без приседания) по двигателю",
-                "включает/выключает авто-режим именно у этого двигателя.",
-                "ВНИМАНИЕ: тогда ключ больше не поворачивает двигатель. false = ключ работает как раньше.")
+        WRENCH_TOGGLE = b.comment("ПКМ гаечным ключом Create (в основной руке, без приседания)",
+                "включает/выключает авто-режим двигателя и забор из баков.",
+                "false = ключ работает штатно (только вращение/демонтаж).")
                 .define("wrenchToggle", true);
         b.pop();
+
+        b.push("tankPulling");
+        PULL_TANKS_ENABLED = b.comment("Может ли двигатель самостоятельно выкачивать лаву из соседних баков/резервуаров.",
+                "false = только прием лавы через трубы.")
+                .define("enabled", true);
+        PULL_DRAIN_MODE = b.comment("Режим выкачки при наличии нескольких баков:",
+                "SEQUENTIAL = опустошает один бак полностью, затем переходит к следующему;",
+                "EVEN = выкачивает лаву со всех баков поровну.")
+                .defineEnum("drainMode", DrainMode.SEQUENTIAL);
+        PULL_INTERVAL = b.comment("Как часто двигатель проверяет и забирает лаву из баков (в тиках).")
+                .defineInRange("intervalTicks", 10, 1, 200);
+        PULL_MAX_RATE = b.comment("Максимальное количество лавы (в мБ), забираемое за один раз.")
+                .defineInRange("maxRateMb", 1000, 1, 4000);
+        b.pop();
+
         SPEC = b.build();
     }
 
@@ -90,6 +120,19 @@ public class CsFluid {
         try { return MARGIN.get(); } catch (Exception e) { return 0.05; }
     }
 
+    public static boolean pullTanksEnabled() {
+        try { return PULL_TANKS_ENABLED.get(); } catch (Exception e) { return true; }
+    }
+    public static DrainMode pullDrainMode() {
+        try { return PULL_DRAIN_MODE.get(); } catch (Exception e) { return DrainMode.SEQUENTIAL; }
+    }
+    public static int pullInterval() {
+        try { return PULL_INTERVAL.get(); } catch (Exception e) { return 10; }
+    }
+    public static int pullMaxRate() {
+        try { return PULL_MAX_RATE.get(); } catch (Exception e) { return 1000; }
+    }
+
     public CsFluid(IEventBus modBus, ModContainer container) {
         container.registerConfig(ModConfig.Type.COMMON, SPEC);
         modBus.addListener(this::registerCaps);
@@ -110,15 +153,15 @@ public class CsFluid {
         LOG.info("[csfluid] Fluid capability зарегистрирована для {}", ENGINE_ID);
     }
 
-    /** Обработчик жидкости: принимает лаву и добавляет её в burnRemaining двигателя. */
-    static class EngineLavaHandler implements IFluidHandler {
+    /** Обработчик жидкости двигателя: принимает лаву и добавляет её в burnRemaining. */
+    public static class EngineLavaHandler implements IFluidHandler {
         private static Field REMAINING;
         private static Field TOTAL;
         private static boolean failed = false;
 
         private final BlockEntity be;
 
-        EngineLavaHandler(BlockEntity be) {
+        public EngineLavaHandler(BlockEntity be) {
             this.be = be;
             init(be.getClass());
         }
@@ -132,11 +175,11 @@ public class CsFluid {
                 TOTAL.setAccessible(true);
             } catch (Exception e) {
                 failed = true;
-                LOG.error("[csfluid] Не удалось получить поля двигателя (версия Compact Steam изменилась?)", e);
+                LOG.error("[csfluid] Не удалось получить поля двигателя", e);
             }
         }
 
-        private double getRemaining() {
+        public double getRemaining() {
             try { return REMAINING.getDouble(be); } catch (Exception e) { return 0; }
         }
 
