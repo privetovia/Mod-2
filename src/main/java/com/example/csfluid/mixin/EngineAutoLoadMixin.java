@@ -22,9 +22,6 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 
-/**
- * Авто-режим нагрузки для Compact Steam Engine и забор лавы из соседних баков.
- */
 @Mixin(targets = "de.genesis.compactsteam.CompactSteamEngineBlockEntity", remap = false)
 public abstract class EngineAutoLoadMixin implements AutoToggle {
 
@@ -62,7 +59,6 @@ public abstract class EngineAutoLoadMixin implements AutoToggle {
 
     @Override public Set<BlockPos> csfGetAllowedTanks() { return csf$allowedTanks; }
 
-    /** Игрок двинул слайдер -> запоминаем как лимит. */
     @Inject(method = "setStep", at = @At("HEAD"), remap = false, require = 0)
     private void csf$onSetStep(int step, CallbackInfo ci) {
         csf$limit = Math.max(1, step);
@@ -102,7 +98,7 @@ public abstract class EngineAutoLoadMixin implements AutoToggle {
                     be.getBlockPos(), CsFluid.autoEnabled(), suStep, csf$limit, csf$allowedTanks.size());
         }
 
-        // 1. Выкачивание лавы из разрешённых соседних баков
+        // 1. Выкачивание лавы из баков
         if (CsFluid.pullTanksEnabled()) {
             if (++csf$pullTimer >= CsFluid.pullInterval()) {
                 csf$pullTimer = 0;
@@ -114,7 +110,7 @@ public abstract class EngineAutoLoadMixin implements AutoToggle {
             }
         }
 
-        // 2. Логика авто-регулировки мощности
+        // 2. Авто-регулировка мощности
         try {
             if (csf$limit <= 0) csf$limit = Math.max(1, suStep);
 
@@ -137,12 +133,26 @@ public abstract class EngineAutoLoadMixin implements AutoToggle {
             float[] net = AutoLoad.read(be);
             if (net == null) return;
 
+            // ЗАЩИТА ОТ OVERSTRESS: если сеть перегружена, немедленно ставим максимум!
+            if (net[0] > net[1] && net[0] > 0) {
+                if (suStep != csf$limit) {
+                    suStep = csf$limit;
+                    settingsChanged();
+                }
+                csf$lowerFor = 0;
+                return;
+            }
+
             float own = isBurning() ? capSu : 0f;
             float othersCapacity = Math.max(0f, net[1] - own);
             float need = Math.max(0f, net[0] - othersCapacity);
 
             int want = (int) Math.ceil(need * (1.0 + CsFluid.margin()) / perStep);
-            int min = CsFluid.minStep();
+
+            // ДЕЖУРНЫЙ РЕЗЕРВ: держим минимум 25% мощности от лимита,
+            // чтобы шагоход не захлёбывался в перегрузке при старте шага
+            int idleReserve = Math.max(CsFluid.minStep(), (int) Math.ceil(csf$limit * 0.25));
+            int min = idleReserve;
             int max = Math.max(min, csf$limit);
             want = Mth.clamp(want, min, max);
 
