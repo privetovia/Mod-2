@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import com.example.csfluid.AutoLoad;
+import com.example.csfluid.AutoToggle;
 import com.example.csfluid.CsFluid;
 
 import net.minecraft.core.HolderLookup;
@@ -16,8 +17,12 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 
+/**
+ * Авто-режим нагрузки для Compact Steam Engine.
+ * Слайдер мощности = ЛИМИТ (csf$limit). Реальная ступень (suStep) подстраивается под нагрузку сети.
+ */
 @Mixin(targets = "de.genesis.compactsteam.CompactSteamEngineBlockEntity", remap = false)
-public abstract class EngineAutoLoadMixin {
+public abstract class EngineAutoLoadMixin implements AutoToggle {
 
     @Shadow private int suStep;
 
@@ -31,7 +36,12 @@ public abstract class EngineAutoLoadMixin {
     @Unique private int csf$lowerFor = 0;
     @Unique private static boolean csf$errorLogged = false;
     @Unique private boolean csf$announced = false;
+    @Unique private boolean csf$auto = true;
 
+    @Override public boolean csfIsAuto() { return csf$auto; }
+    @Override public void csfSetAuto(boolean value) { csf$auto = value; }
+
+    /** Игрок двинул слайдер -> запоминаем как лимит. */
     @Inject(method = "setStep", at = @At("HEAD"), remap = false, require = 0)
     private void csf$onSetStep(int step, CallbackInfo ci) {
         csf$limit = Math.max(1, step);
@@ -40,11 +50,13 @@ public abstract class EngineAutoLoadMixin {
     @Inject(method = "write", at = @At("TAIL"), remap = false, require = 0)
     private void csf$write(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket, CallbackInfo ci) {
         tag.putInt("CsfLimit", csf$limit > 0 ? csf$limit : suStep);
+        tag.putBoolean("CsfAuto", csf$auto);
     }
 
     @Inject(method = "read", at = @At("TAIL"), remap = false, require = 0)
     private void csf$read(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket, CallbackInfo ci) {
         if (tag.contains("CsfLimit")) csf$limit = Math.max(1, tag.getInt("CsfLimit"));
+        if (tag.contains("CsfAuto")) csf$auto = tag.getBoolean("CsfAuto");
     }
 
     @Inject(method = "tick", at = @At("HEAD"), remap = false, require = 0)
@@ -62,7 +74,8 @@ public abstract class EngineAutoLoadMixin {
         try {
             if (csf$limit <= 0) csf$limit = Math.max(1, suStep);
 
-            if (!CsFluid.autoEnabled()) {
+            // авто-режим выключен (в конфиге или ключом у этого двигателя) -> вернуть ступень на лимит
+            if (!CsFluid.autoEnabled() || !csf$auto) {
                 if (suStep != csf$limit) {
                     suStep = csf$limit;
                     settingsChanged();
