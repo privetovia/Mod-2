@@ -16,10 +16,6 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 
-/**
- * Авто-режим нагрузки для Compact Steam Engine.
- * Слайдер мощности = ЛИМИТ (csf$limit). Реальная ступень (suStep) подстраивается под нагрузку сети.
- */
 @Mixin(targets = "de.genesis.compactsteam.CompactSteamEngineBlockEntity", remap = false)
 public abstract class EngineAutoLoadMixin {
 
@@ -34,8 +30,8 @@ public abstract class EngineAutoLoadMixin {
     @Unique private int csf$timer = 0;
     @Unique private int csf$lowerFor = 0;
     @Unique private static boolean csf$errorLogged = false;
+    @Unique private boolean csf$announced = false;
 
-    /** Игрок двинул слайдер -> запоминаем как лимит. */
     @Inject(method = "setStep", at = @At("HEAD"), remap = false, require = 0)
     private void csf$onSetStep(int step, CallbackInfo ci) {
         csf$limit = Math.max(1, step);
@@ -57,10 +53,15 @@ public abstract class EngineAutoLoadMixin {
         Level level = be.getLevel();
         if (level == null || level.isClientSide) return;
 
+        if (!csf$announced) {
+            csf$announced = true;
+            CsFluid.LOG.info("[csfluid] Миксин активен: двигатель {} (авто={}, ступень={}, лимит={})",
+                    be.getBlockPos(), CsFluid.autoEnabled(), suStep, csf$limit);
+        }
+
         try {
             if (csf$limit <= 0) csf$limit = Math.max(1, suStep);
 
-            // авто-режим выключен в конфиге -> вернуть ступень на лимит
             if (!CsFluid.autoEnabled()) {
                 if (suStep != csf$limit) {
                     suStep = csf$limit;
@@ -90,12 +91,16 @@ public abstract class EngineAutoLoadMixin {
             want = Mth.clamp(want, min, max);
 
             if (want > cur) {
+                CsFluid.LOG.info("[csfluid] {}: нагрузка={} SU, ёмкость={} SU, ступень {} -> {} (лимит {})",
+                        be.getBlockPos(), net[0], net[1], cur, want, max);
                 csf$lowerFor = 0;
                 suStep = want;
                 settingsChanged();
             } else if (want < cur) {
                 csf$lowerFor += interval;
                 if (csf$lowerFor >= CsFluid.lowerDelay()) {
+                    CsFluid.LOG.info("[csfluid] {}: нагрузка={} SU, ёмкость={} SU, ступень {} -> {} (лимит {})",
+                            be.getBlockPos(), net[0], net[1], cur, want, max);
                     csf$lowerFor = 0;
                     suStep = want;
                     settingsChanged();
