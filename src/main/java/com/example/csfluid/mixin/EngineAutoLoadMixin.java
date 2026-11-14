@@ -1,5 +1,8 @@
 package com.example.csfluid.mixin;
 
+import java.util.HashSet;
+import java.util.Set;
+
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -10,7 +13,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import com.example.csfluid.AutoLoad;
 import com.example.csfluid.AutoToggle;
 import com.example.csfluid.CsFluid;
+import com.example.csfluid.TankPuller;
 
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.util.Mth;
@@ -18,8 +23,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 
 /**
- * Авто-режим нагрузки для Compact Steam Engine.
- * Слайдер мощности = ЛИМИТ (csf$limit). Реальная ступень (suStep) подстраивается под нагрузку сети.
+ * Авто-режим нагрузки для Compact Steam Engine и забор лавы из соседних баков.
  */
 @Mixin(targets = "de.genesis.compactsteam.CompactSteamEngineBlockEntity", remap = false)
 public abstract class EngineAutoLoadMixin implements AutoToggle {
@@ -33,13 +37,30 @@ public abstract class EngineAutoLoadMixin implements AutoToggle {
 
     @Unique private int csf$limit = 0;
     @Unique private int csf$timer = 0;
+    @Unique private int csf$pullTimer = 0;
     @Unique private int csf$lowerFor = 0;
     @Unique private static boolean csf$errorLogged = false;
     @Unique private boolean csf$announced = false;
     @Unique private boolean csf$auto = true;
+    @Unique private final Set<BlockPos> csf$allowedTanks = new HashSet<>();
 
     @Override public boolean csfIsAuto() { return csf$auto; }
     @Override public void csfSetAuto(boolean value) { csf$auto = value; }
+
+    @Override public boolean csfIsTankAllowed(BlockPos pos) { return csf$allowedTanks.contains(pos); }
+
+    @Override
+    public boolean csfToggleTank(BlockPos pos) {
+        if (csf$allowedTanks.contains(pos)) {
+            csf$allowedTanks.remove(pos);
+            return false;
+        } else {
+            csf$allowedTanks.add(pos.immutable());
+            return true;
+        }
+    }
+
+    @Override public Set<BlockPos> csfGetAllowedTanks() { return csf$allowedTanks; }
 
     /** Игрок двинул слайдер -> запоминаем как лимит. */
     @Inject(method = "setStep", at = @At("HEAD"), remap = false, require = 0)
@@ -51,12 +72,22 @@ public abstract class EngineAutoLoadMixin implements AutoToggle {
     private void csf$write(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket, CallbackInfo ci) {
         tag.putInt("CsfLimit", csf$limit > 0 ? csf$limit : suStep);
         tag.putBoolean("CsfAuto", csf$auto);
+
+        long[] tankArr = csf$allowedTanks.stream().mapToLong(BlockPos::asLong).toArray();
+        tag.putLongArray("CsfAllowedTanks", tankArr);
     }
 
     @Inject(method = "read", at = @At("TAIL"), remap = false, require = 0)
     private void csf$read(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket, CallbackInfo ci) {
         if (tag.contains("CsfLimit")) csf$limit = Math.max(1, tag.getInt("CsfLimit"));
         if (tag.contains("CsfAuto")) csf$auto = tag.getBoolean("CsfAuto");
+
+        if (tag.contains("CsfAllowedTanks")) {
+            csf$allowedTanks.clear();
+            for (long l : tag.getLongArray("CsfAllowedTanks")) {
+                csf$allowedTanks.add(BlockPos.of(l));
+            }
+        }
     }
 
     @Inject(method = "tick", at = @At("HEAD"), remap = false, require = 0)
@@ -67,14 +98,26 @@ public abstract class EngineAutoLoadMixin implements AutoToggle {
 
         if (!csf$announced) {
             csf$announced = true;
-            CsFluid.LOG.info("[csfluid] Миксин активен: двигатель {} (авто={}, ступень={}, лимит={})",
-                    be.getBlockPos(), CsFluid.autoEnabled(), suStep, csf$limit);
+            CsFluid.LOG.info("[csfluid] Двигатель {} активен (авто={}, ступень={}, лимит={}, баков={})",
+                    be.getBlockPos(), CsFluid.autoEnabled(), suStep, csf$limit, csf$allowedTanks.size());
         }
 
+        // 1. Выкачивание лавы из разрешённых соседних баков
+        if (CsFluid.pullTanksEnabled()) {
+            if (++csf$pullTimer >= CsFluid.pullInterval()) {
+                csf$pullTimer = 0;
+                try {
+                    TankPuller.tickPull(be, this);
+                } catch (Throwable t) {
+                    CsFluid.LOG.error("[csfluid] Ошибка при выкачке лавы из бака", t);
+                }
+            }
+        }
+
+        // 2. Логика авто-регулировки мощности
         try {
             if (csf$limit <= 0) csf$limit = Math.max(1, suStep);
 
-            // авто-режим выключен (в конфиге или ключом у этого двигателя) -> вернуть ступень на лимит
             if (!CsFluid.autoEnabled() || !csf$auto) {
                 if (suStep != csf$limit) {
                     suStep = csf$limit;
