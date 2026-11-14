@@ -15,6 +15,7 @@ import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
+import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.capabilities.Capabilities;
 import net.neoforged.neoforge.capabilities.ICapabilityProvider;
 import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
@@ -46,6 +47,7 @@ public class CsFluid {
     public static final ModConfigSpec.IntValue LOWER_DELAY;
     public static final ModConfigSpec.IntValue MIN_STEP;
     public static final ModConfigSpec.DoubleValue MARGIN;
+    public static final ModConfigSpec.BooleanValue WRENCH_TOGGLE;
 
     static {
         ModConfigSpec.Builder b = new ModConfigSpec.Builder();
@@ -61,6 +63,10 @@ public class CsFluid {
                 .defineInRange("safetyMargin", 0.05, 0.0, 1.0);
         MIN_STEP = b.comment("Минимальная ступень мощности на холостом ходу.")
                 .defineInRange("minStep", 1, 1, 100);
+        WRENCH_TOGGLE = b.comment("ПКМ гаечным ключом Create (в основной руке, без приседания) по двигателю",
+                "включает/выключает авто-режим именно у этого двигателя.",
+                "ВНИМАНИЕ: тогда ключ больше не поворачивает двигатель. false = ключ работает как раньше.")
+                .define("wrenchToggle", true);
         b.pop();
         SPEC = b.build();
     }
@@ -77,6 +83,9 @@ public class CsFluid {
     public static int minStep() {
         try { return MIN_STEP.get(); } catch (Exception e) { return 1; }
     }
+    public static boolean wrenchToggle() {
+        try { return WRENCH_TOGGLE.get(); } catch (Exception e) { return true; }
+    }
     public static double margin() {
         try { return MARGIN.get(); } catch (Exception e) { return 0.05; }
     }
@@ -84,6 +93,7 @@ public class CsFluid {
     public CsFluid(IEventBus modBus, ModContainer container) {
         container.registerConfig(ModConfig.Type.COMMON, SPEC);
         modBus.addListener(this::registerCaps);
+        NeoForge.EVENT_BUS.addListener(WrenchToggle::onRightClick);
     }
 
     @SuppressWarnings("unchecked")
