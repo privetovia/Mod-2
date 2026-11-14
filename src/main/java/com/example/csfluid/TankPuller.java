@@ -21,6 +21,9 @@ public final class TankPuller {
     public static void tickPull(BlockEntity engineBe, AutoToggle toggle) {
         if (!CsFluid.pullTanksEnabled()) return;
 
+        // Если в двигателе лежит уголь/предмет, лаву из баков не тянем!
+        if (CsFluid.hasSolidFuel(engineBe)) return;
+
         Level level = engineBe.getLevel();
         if (level == null || level.isClientSide()) return;
 
@@ -32,7 +35,6 @@ public final class TankPuller {
         // 1. Ищем валидные соседние баки среди разрешенных
         List<IFluidHandler> validTanks = new ArrayList<>();
         for (BlockPos targetPos : allowed) {
-            // Должен стоять вплотную (расстояние <= 1 блок)
             if (!targetPos.closerThan(enginePos, 2.0)) continue;
 
             Direction dirTowardsEngine = Direction.getNearest(
@@ -47,7 +49,6 @@ public final class TankPuller {
             }
 
             if (tankHandler != null) {
-                // Проверяем, есть ли там лава
                 FluidStack simulated = tankHandler.drain(1, FluidAction.SIMULATE);
                 if (!simulated.isEmpty() && simulated.is(FluidTags.LAVA)) {
                     validTanks.add(tankHandler);
@@ -63,12 +64,11 @@ public final class TankPuller {
             engineHandler = new CsFluid.EngineLavaHandler(engineBe);
         }
 
-        // Проверяем свободное место в двигателе
         FluidStack probe = new FluidStack(Fluids.LAVA, CsFluid.pullMaxRate());
         int totalSpace = engineHandler.fill(probe, FluidAction.SIMULATE);
         if (totalSpace <= 0) return;
 
-        // 3. Выкачиваем в соответствии с режимом
+        // 3. Выкачиваем в соответствии с выбранным режимом
         if (CsFluid.pullDrainMode() == CsFluid.DrainMode.EVEN) {
             pullEven(engineHandler, validTanks, totalSpace);
         } else {
@@ -76,7 +76,6 @@ public final class TankPuller {
         }
     }
 
-    /** Режим SEQUENTIAL: опустошаем баки по очереди один за другим */
     private static void pullSequential(IFluidHandler engine, List<IFluidHandler> tanks, int totalSpace) {
         int remainingSpace = totalSpace;
         for (IFluidHandler tank : tanks) {
@@ -93,7 +92,6 @@ public final class TankPuller {
         }
     }
 
-    /** Режим EVEN: делим забор поровну между всеми доступными баками */
     private static void pullEven(IFluidHandler engine, List<IFluidHandler> tanks, int totalSpace) {
         int remainingSpace = totalSpace;
         int count = tanks.size();
@@ -113,7 +111,6 @@ public final class TankPuller {
             }
         }
 
-        // Если в каких-то баках лавы было меньше нормы и место осталось — добираем остаток
         if (remainingSpace > 0) {
             pullSequential(engine, tanks, remainingSpace);
         }
